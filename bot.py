@@ -7,45 +7,40 @@ from datetime import datetime
 
 TOKEN = "8508934165:AAFs0k-TTbVqZj1A892KukwzkOsqXRUs1MY"
 CHAT_ID = "692099904"
-CHECK_INTERVAL = 60  # секунд
+CHECK_INTERVAL = 60
 SEEN_FILE = "seen_vacancies.json"
-
 SEARCH_URL = "https://api.robota.ua/vacancy/search"
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)",
-    "Accept": "application/json",
+    "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+    "Accept": "application/json, text/plain, */*",
     "Content-Type": "application/json",
     "Origin": "https://robota.ua",
     "Referer": "https://robota.ua/",
 }
+
 SEARCH_PAYLOAD = {
     "keyWords": "новий магазин",
-    "companyIds": [],
-    "employerName": "Аврора",
     "page": 0,
-    "count": 20,
+    "count": 50,
+    "sort": 0,
     "ukrainian": True,
+    "period": 1,
 }
-
-
-def send_telegram(text):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False,
-    }
-    try:
-        resp = requests.post(url, json=payload, timeout=10)
-        return resp.status_code == 200
-    except Exception as e:
-        print(f"[{now()}] Помилка Telegram: {e}")
-        return False
 
 
 def now():
     return datetime.now().strftime("%H:%M:%S")
+
+
+def send_telegram(text):
+    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+    try:
+        resp = requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=10)
+        return resp.status_code == 200
+    except Exception as e:
+        print(f"[{now()}] Telegram помилка: {e}")
+        return False
 
 
 def load_seen():
@@ -60,102 +55,112 @@ def save_seen(seen):
         json.dump(list(seen), f)
 
 
-def fetch_vacancies():
-    try:
-        resp = requests.post(
-            SEARCH_URL,
-            headers=HEADERS,
-            json=SEARCH_PAYLOAD,
-            timeout=15,
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            return data.get("documents", []) or data.get("vacancies", []) or []
-        else:
-            print(f"[{now()}] HTTP {resp.status_code}")
-            return []
-    except Exception as e:
-        print(f"[{now()}] Помилка запиту: {e}")
-        return []
+def is_aurora(v):
+    company = str(v.get("companyName", "") or v.get("company", {}).get("name", "")).lower()
+    return "аврора" in company or "aurora" in company
 
 
-def format_vacancy(v):
-    title = v.get("name", v.get("title", "Без назви"))
-    company = v.get("companyName", v.get("company", {}).get("name", "Аврора"))
-    city = v.get("cityName", v.get("city", {}).get("name", ""))
+def has_new_store(v):
+    text = " ".join([
+        str(v.get("name", "")),
+        str(v.get("title", "")),
+        str(v.get("shortDescription", "")),
+        str(v.get("description", "")),
+    ]).lower()
+    return any(kw in text for kw in ["новий магазин", "нового магазину", "нового магазина"])
+
+
+def get_id(v):
+    vid = str(v.get("id", "") or v.get("vacancyId", ""))
+    if vid:
+        return vid
+    return hashlib.md5((str(v.get("name","")) + str(v.get("companyName","")) + str(v.get("cityName",""))).encode()).hexdigest()
+
+
+def format_msg(v):
+    vid = str(v.get("id", "") or v.get("vacancyId", ""))
+    link = f"https://robota.ua/ua/vacancy/{vid}" if vid else "https://robota.ua/ua/company/3698/vacancies"
+    city = v.get("cityName", "") or v.get("city", {}).get("name", "")
     salary = v.get("salary", "")
-    vacancy_id = str(v.get("id", v.get("vacancyId", "")))
-    link = f"https://robota.ua/ua/vacancy/{vacancy_id}" if vacancy_id else "https://robota.ua"
-
+    published = v.get("publishedAt", v.get("datePosted", ""))
     parts = [
-        f"🆕 <b>Нова вакансія Аврора!</b>",
-        f"📌 <b>{title}</b>",
-        f"🏢 {company}",
+        "🆕 <b>Нова вакансія АВРОРА!</b>",
+        f"📌 <b>{v.get('name', 'Без назви')}</b>",
+        f"🏢 {v.get('companyName', 'Аврора')}",
     ]
-    if city:
-        parts.append(f"📍 {city}")
-    if salary:
-        parts.append(f"💰 {salary}")
+    if city: parts.append(f"📍 {city}")
+    if salary: parts.append(f"💰 {salary}")
+    if published: parts.append(f"📅 {str(published)[:10]}")
     parts.append(f"🔗 <a href='{link}'>Переглянути вакансію</a>")
     parts.append(f"⏰ {datetime.now().strftime('%d.%m.%Y %H:%M')}")
     return "\n".join(parts)
 
 
-def get_vacancy_id(v):
-    vid = str(v.get("id", v.get("vacancyId", "")))
-    if vid:
-        return vid
-    # Якщо немає id — хешуємо назву+місто
-    key = str(v.get("name", "")) + str(v.get("cityName", ""))
-    return hashlib.md5(key.encode()).hexdigest()
+def fetch():
+    try:
+        r = requests.post(SEARCH_URL, headers=HEADERS, json=SEARCH_PAYLOAD, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            items = data.get("documents") or data.get("vacancies") or data.get("items") or []
+            print(f"[{now()}] Отримано {len(items)} вакансій з API")
+            return items
+        print(f"[{now()}] HTTP {r.status_code}")
+    except Exception as e:
+        print(f"[{now()}] Помилка запиту: {e}")
+    return []
 
 
-def check_vacancies(seen):
-    vacancies = fetch_vacancies()
-    new_count = 0
-
-    for v in vacancies:
-        vid = get_vacancy_id(v)
-        if vid not in seen:
-            title = v.get("name", v.get("title", "")).lower()
-            # Додаткова перевірка на "новий магазин" якщо API повернув зайве
-            if "новий магазин" in title or "новий магазин" in str(v).lower():
-                msg = format_vacancy(v)
-                if send_telegram(msg):
-                    print(f"[{now()}] ✅ Надіслано: {v.get('name', vid)}")
-                seen.add(vid)
-                new_count += 1
-            else:
-                # Зберігаємо щоб не перевіряти знову
-                seen.add(vid)
-
-    return new_count
+def check(seen):
+    items = fetch()
+    sent = 0
+    for v in items:
+        vid = get_id(v)
+        if vid in seen:
+            continue
+        seen.add(vid)
+        if not is_aurora(v):
+            continue
+        if not has_new_store(v):
+            print(f"[{now()}] Аврора (не 'новий магазин'): {v.get('name','')}")
+            continue
+        if send_telegram(format_msg(v)):
+            print(f"[{now()}] ✅ НАДІСЛАНО: {v.get('name','')}")
+            sent += 1
+    return sent, len(items)
 
 
 def main():
-    print(f"[{now()}] 🤖 Бот запущено. Перевірка кожні {CHECK_INTERVAL} сек.")
-    print(f"[{now()}] Шукаємо: Аврора + 'новий магазин'")
-
+    print(f"[{now()}] 🤖 Бот запущено (v2 — виправлений фільтр)")
     send_telegram(
-        "🤖 <b>Бот запущено!</b>\n"
-        "Слідкую за вакансіями <b>Аврора</b> з 'новий магазин'\n"
-        f"⏱ Перевірка кожну хвилину"
+        "🤖 <b>Бот оновлено!</b>\n\n"
+        "✅ Тільки вакансії <b>Аврора</b>\n"
+        "✅ Тільки з 'новий магазин'\n"
+        "✅ Сортування за датою\n"
+        "⏱ Перевірка кожну хвилину"
     )
 
     seen = load_seen()
-    print(f"[{now()}] Завантажено {len(seen)} відомих вакансій")
+    print(f"[{now()}] Відомих вакансій: {len(seen)}")
+
+    if len(seen) == 0:
+        print(f"[{now()}] Перший запуск — зберігаємо поточні без надсилання")
+        for v in fetch():
+            seen.add(get_id(v))
+        save_seen(seen)
+        send_telegram(f"📋 Збережено {len(seen)} поточних вакансій. Чекаємо нових...")
+        time.sleep(CHECK_INTERVAL)
 
     while True:
         try:
-            new = check_vacancies(seen)
+            sent, total = check(seen)
             save_seen(seen)
-            if new == 0:
-                print(f"[{now()}] Нових вакансій немає ({len(seen)} відомих)")
+            if sent == 0:
+                print(f"[{now()}] Нових немає (перевірено {total})")
         except Exception as e:
-            print(f"[{now()}] Помилка циклу: {e}")
-
+            print(f"[{now()}] Помилка: {e}")
         time.sleep(CHECK_INTERVAL)
 
 
 if __name__ == "__main__":
     main()
+

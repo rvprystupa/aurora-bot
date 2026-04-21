@@ -1,4 +1,4 @@
-yamlname: Aurora Vacancy Check
+name: Aurora Vacancy Check
 
 on:
   schedule:
